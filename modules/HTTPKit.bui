@@ -1,0 +1,411 @@
+Import HTTPServer
+Import crypto
+Import filesystemkit
+
+''' One request; route captures are separate from the bundled router's captures.
+Public Class HttpKitContext
+    Public Property Request As HttpRequest
+    Public Property Response As HttpResponse
+    Private Property mNames As Array Of String
+    Private Property mValues As Array Of String
+
+    Public Sub Constructor(requestValue As HttpRequest, responseValue As HttpResponse)
+        Request = requestValue
+        Response = responseValue
+    End Sub
+
+    Public Function Param(name As String) As Optional Of String
+        For i As Integer = 0 To Array.Count(mNames) - 1
+            If String.Compare(mNames(i), name, True) = 0 Then Return Some(mValues(i))
+        Next
+        Return None
+    End Function
+
+    Public Sub SetCapture(name As String, captured As String)
+        Array.Append(mNames, name)
+        Array.Append(mValues, captured)
+    End Sub
+
+    ''' The compatibility serializer computes HEAD length and suppresses its body.
+    Public Sub Write(text As String)
+        Response.Write(text)
+    End Sub
+End Class
+
+Public Interface HttpKitHandler
+    Sub Handle(context As HttpKitContext)
+End Interface
+
+Public Interface HttpKitMiddleware
+    ''' False short-circuits routing. After still runs for this middleware.
+    Function Before(context As HttpKitContext) As Boolean
+    Sub After(context As HttpKitContext)
+End Interface
+
+Private Class HttpKitRoute
+    Public Property Method As String
+    Public Property Pattern As String
+    Public Property Handler As HttpKitHandler
+    Public Property Score As Integer
+End Class
+
+Private Function Exact(a As String, b As String) As Boolean
+    Return String.Compare(a, b, True) = 0
+End Function
+
+Private Sub ValidatePath(value As String, pattern As Boolean)
+    If String.Len(value) = 0 Or Not String.StartsWith(value, "/", True) Then Throw New InvalidArgumentException("HTTPKit paths must begin with /")
+    If String.Len(value) > 8192 Then Throw New InvalidArgumentException("HTTPKit path exceeds 8192 scalars")
+    Dim raw As Bytes = Bytes.FromString(value, Text.Encodings.UTF8)
+    For i As Integer = 0 To raw.Count - 1
+        Dim n As Integer = raw.Item(i)
+        If n < 32 Or n = 127 Or n = 92 Or n = 37 Or n = 63 Or n = 35 Then Throw New InvalidArgumentException("HTTPKit path contains a forbidden character")
+    Next
+    Dim parts As Array Of String = String.Split(value, "/")
+    For i As Integer = 1 To Array.Count(parts) - 1
+        Dim part As String = parts(i)
+        If Exact(part, ".") Or Exact(part, "..") Or String.Contains(part, ":", True) Then
+            If Not pattern Or Not String.StartsWith(part, ":", True) Or String.Len(part) < 2 Then Throw New InvalidArgumentException("HTTPKit path contains an invalid segment")
+        End If
+        If Exact(part, "") And i < Array.Count(parts) - 1 Then Throw New InvalidArgumentException("HTTPKit paths cannot contain empty interior segments")
+    Next
+End Sub
+
+Private Function TrimHttpWhitespace(value As String) As String
+    Dim raw As Bytes = Bytes.FromString(value, Text.Encodings.UTF8)
+    Dim first As Integer = 0
+    Dim last As Integer = raw.Count
+    While first < last
+        If raw.Item(first) <> 32 And raw.Item(first) <> 9 Then Exit While
+        first += 1
+    End While
+    While last > first
+        If raw.Item(last - 1) <> 32 And raw.Item(last - 1) <> 9 Then Exit While
+        last -= 1
+    End While
+    ' Removed bytes are ASCII, so their counts also count Unicode scalars.
+    Return String.Substring(value, first, String.Len(value) - first - (raw.Count - last))
+End Function
+
+Private Function ValidEntityTag(tag As String) As Boolean
+    Dim raw As Bytes = Bytes.FromString(tag, Text.Encodings.UTF8)
+    If raw.Count < 2 Then Return False
+    If raw.Item(0) <> 34 Or raw.Item(raw.Count - 1) <> 34 Then Return False
+    For i As Integer = 1 To raw.Count - 2
+        Dim n As Integer = raw.Item(i)
+        If n <> 33 And (n < 35 Or n = 127) Then Return False
+    Next
+    Return True
+End Function
+
+''' HTTP helpers use case-sensitive entity tags and RFC 9110 weak matching for GET/HEAD.
+Public Function HttpKitETagMatches(ifNoneMatch As String, etag As String) As Boolean
+    Dim expected As String = TrimHttpWhitespace(etag)
+    If String.Compare(String.Left(expected, 2), "W/", True) = 0 Then expected = String.Substring(expected, 2)
+    If Not ValidEntityTag(expected) Then Throw New InvalidArgumentException("Expected a valid quoted entity tag")
+    Dim source As String = TrimHttpWhitespace(ifNoneMatch)
+    If Exact(source, "*") Then Return True
+    Dim raw As Bytes = Bytes.FromString(source, Text.Encodings.UTF8)
+    Dim wanted As Bytes = Bytes.FromString(expected, Text.Encodings.UTF8)
+    Dim size As Integer = raw.Count
+    Dim i As Integer = 0
+    Dim matched As Boolean = False
+    While i < size
+        ' RFC 9110 5.6.1: recipients accept empty list elements such as "a",,"b",
+        While i < size
+            Dim n As Integer = raw.Item(i)
+            If n <> 32 And n <> 9 And n <> 44 Then Exit While
+            i += 1
+        End While
+        If i >= size Then Return matched
+        If size - i >= 2 Then
+            If raw.Item(i) = 87 And raw.Item(i + 1) = 47 Then i += 2
+        End If
+        If i >= size Then Return False
+        If raw.Item(i) <> 34 Then Return False
+        Dim first As Integer = i
+        i += 1
+        While i < size
+            Dim n As Integer = raw.Item(i)
+            If n = 34 Then Exit While
+            If n <> 33 And (n < 35 Or n = 127) Then Return False
+            i += 1
+        End While
+        If i >= size Then Return False
+        i += 1
+        If i - first = wanted.Count Then
+            Dim equalTag As Boolean = True
+            For offset As Integer = 0 To wanted.Count - 1
+                If raw.Item(first + offset) <> wanted.Item(offset) Then equalTag = False
+            Next
+            If equalTag Then matched = True
+        End If
+        While i < size
+            Dim n As Integer = raw.Item(i)
+            If n <> 32 And n <> 9 Then Exit While
+            i += 1
+        End While
+        If i = size Then Return matched
+        If raw.Item(i) <> 44 Then Return False
+        i += 1
+    End While
+    Return matched
+End Function
+
+''' Strong SHA-256 validator of exactly the supplied representation bytes.
+Public Function HttpKitETag(data As Bytes) As String
+    If data Is Nil Then Throw New InvalidArgumentException("HTTPKit bytes cannot be Nil")
+    Return "\"" + Crypto.Hash(Crypto.HashAlgorithms.SHA256, data).ToHex() + "\""
+End Function
+
+''' Set the validator; return True after producing a bodyless 304 for GET/HEAD.
+Public Function HttpKitNotModified(context As HttpKitContext, etag As String) As Boolean
+    Dim validatedTag As String = etag
+    If String.Compare(String.Left(validatedTag, 2), "W/", True) = 0 Then validatedTag = String.Substring(validatedTag, 2)
+    If Not ValidEntityTag(validatedTag) Then Throw New InvalidArgumentException("Invalid HTTPKit entity tag")
+    context.Response.SetHeader("ETag", etag)
+    If Not Exact(context.Request.Method, "GET") And Not Exact(context.Request.Method, "HEAD") Then Return False
+    Dim conditionalHeader As Optional Of String = context.Request.Header("If-None-Match")
+    If conditionalHeader.HasValue Then
+        If HttpKitETagMatches(conditionalHeader.Value, etag) Then
+            context.Response.StatusCode = 304
+            Return True
+        End If
+    End If
+    Return False
+End Function
+
+''' A configure-before-Listen router with ordered, short-circuiting middleware.
+Public Class HttpKitServer Inherits HTTPServer
+    Private Property mRoutes As Array Of HttpKitRoute
+    Private Property mMiddleware As Array Of HttpKitMiddleware
+    Private Property mFrozen As Boolean = False
+
+    Public Overrides Sub Listen()
+        mFrozen = True
+        Super.Listen()
+    End Sub
+
+    Public Sub Use(middleware As HttpKitMiddleware)
+        If mFrozen Then Throw New UnsupportedOperationException("HTTPKit configuration is frozen after Listen")
+        If middleware Is Nil Then Throw New InvalidArgumentException("Middleware cannot be Nil")
+        Array.Append(mMiddleware, middleware)
+    End Sub
+
+    ''' :name captures one segment; final *name captures zero or more segments.
+    Public Sub Route(method As String, pattern As String, handler As HttpKitHandler)
+        If mFrozen Then Throw New UnsupportedOperationException("HTTPKit configuration is frozen after Listen")
+        If handler Is Nil Then Throw New InvalidArgumentException("Handler cannot be Nil")
+        If Not Exact(method, "GET") And Not Exact(method, "HEAD") And Not Exact(method, "POST") And Not Exact(method, "PUT") And Not Exact(method, "PATCH") And Not Exact(method, "DELETE") And Not Exact(method, "OPTIONS") And Not Exact(method, "*") Then Throw New InvalidArgumentException("HTTPKit method must be an uppercase supported token or *")
+        ValidatePath(pattern, True)
+        Dim parts As Array Of String = String.Split(pattern, "/")
+        Dim names() As String
+        Dim score As Integer = 0
+        For i As Integer = 1 To Array.Count(parts) - 1
+            Dim part As String = parts(i)
+            If String.StartsWith(part, ":", True) Or String.StartsWith(part, "*", True) Then
+                Dim name As String = String.Substring(part, 1)
+                If String.Len(name) = 0 Then Throw New InvalidArgumentException("Capture names cannot be empty")
+                If String.StartsWith(part, "*", True) And i <> Array.Count(parts) - 1 Then Throw New InvalidArgumentException("Wildcard must be the final segment")
+                For Each previous As String In names
+                    If Exact(name, previous) Then Throw New InvalidArgumentException("Duplicate capture name")
+                Next
+                Array.Append(names, name)
+                If String.StartsWith(part, ":", True) Then score += 1
+            Else
+                score += 100
+            End If
+        Next
+        Dim route As New HttpKitRoute()
+        route.Method = method
+        route.Pattern = pattern
+        route.Handler = handler
+        route.Score = score
+        Array.Append(mRoutes, route)
+    End Sub
+
+    Private Function Match(pattern As String, url As String, context As HttpKitContext) As Boolean
+        Dim expected As Array Of String = String.Split(pattern, "/")
+        Dim actual As Array Of String = String.Split(url, "/")
+        For i As Integer = 1 To Array.Count(expected) - 1
+            Dim segment As String = expected(i)
+            If String.StartsWith(segment, "*", True) Then
+                If i > Array.Count(actual) Then Return False
+                Dim tail As String = ""
+                For j As Integer = i To Array.Count(actual) - 1
+                    If j > i Then tail += "/"
+                    tail += actual(j)
+                Next
+                context.SetCapture(String.Substring(segment, 1), tail)
+                Return True
+            End If
+            If i >= Array.Count(actual) Then Return False
+            If String.StartsWith(segment, ":", True) Then
+                If Exact(actual(i), "") Then Return False
+                context.SetCapture(String.Substring(segment, 1), actual(i))
+            ElseIf Not Exact(segment, actual(i)) Then
+                Return False
+            End If
+        Next
+        Return Array.Count(expected) = Array.Count(actual)
+    End Function
+
+    Public Overrides Sub OnNotFound(request As HttpRequest, response As HttpResponse)
+        Dim context As New HttpKitContext(request, response)
+        Try
+            ValidatePath(request.UrlPath, False)
+        Catch invalid As InvalidArgumentException
+            response.StatusCode = 400
+            context.Write("Bad request path")
+            Return
+        End Try
+        Dim entered As Integer = 0
+        Try
+            For Each middleware As HttpKitMiddleware In mMiddleware
+                entered += 1
+                If Not middleware.Before(context) Then Return
+            Next
+            Dim best As HttpKitRoute = Nil
+            Dim bestScore As Integer = -1
+            Dim pathFound As Boolean = False
+            Dim allowed() As String
+            For Each candidate As HttpKitRoute In mRoutes
+                Dim trial As New HttpKitContext(request, response)
+                If Match(candidate.Pattern, request.UrlPath, trial) Then
+                    pathFound = True
+                    Dim present As Boolean = False
+                    For Each token As String In allowed
+                        If Exact(token, candidate.Method) Then present = True
+                    Next
+                    If Not present And Not Exact(candidate.Method, "*") Then Array.Append(allowed, candidate.Method)
+                    If Exact(candidate.Method, "GET") Then
+                        Dim headPresent As Boolean = False
+                        For Each token As String In allowed
+                            If Exact(token, "HEAD") Then headPresent = True
+                        Next
+                        If Not headPresent Then Array.Append(allowed, "HEAD")
+                    End If
+                    Dim score As Integer = candidate.Score * 10
+                    Dim compatible As Boolean = Exact(candidate.Method, request.Method) Or Exact(candidate.Method, "*")
+                    If Exact(request.Method, "HEAD") And Exact(candidate.Method, "GET") Then compatible = True
+                    If Exact(candidate.Method, request.Method) Then score += 2
+                    If Exact(candidate.Method, "GET") And Exact(request.Method, "HEAD") Then score += 1
+                    If compatible And score > bestScore Then
+                        best = candidate
+                        bestScore = score
+                    End If
+                End If
+            Next
+            If best Is Nil Then
+                If pathFound Then
+                    response.StatusCode = 405
+                    response.SetHeader("Allow", String.Join(allowed, ", "))
+                    context.Write("Method not allowed")
+                Else
+                    response.StatusCode = 404
+                    context.Write("Not found")
+                End If
+            Else
+                Dim copied As Boolean = Match(best.Pattern, request.UrlPath, context)
+                best.Handler.Handle(context)
+            End If
+        Finally
+            For i As Integer = entered - 1 To 0 Step -1
+                mMiddleware(i).After(context)
+            Next
+        End Try
+    End Sub
+End Class
+
+''' Bounded whole-file responses; no directory listings or implicit index files.
+Public Class HttpKitStaticFiles Implements HttpKitHandler
+    Private Property mRoot As String
+    Private Property mCapture As String
+    Private Property mMaxBytes As Integer
+
+    Public Sub Constructor(root As String, captureName As String = "file", maxFileBytes As Integer = 8388608)
+        If String.Len(root) = 0 Or maxFileBytes < 0 Or maxFileBytes > 67108864 Then Throw New InvalidArgumentException("Invalid HTTPKit static root or byte budget")
+        If String.Len(captureName) = 0 Then Throw New InvalidArgumentException("Static capture name cannot be empty")
+        Dim entry As FileEntry = InspectFileEntry(root)
+        If Not Exact(entry.Kind, "directory") Or entry.IsLink Then Throw New InvalidArgumentException("Static root must be a real directory")
+        mRoot = entry.Path
+        mCapture = captureName
+        mMaxBytes = maxFileBytes
+    End Sub
+
+    Public Sub Handle(context As HttpKitContext)
+        If Not Exact(context.Request.Method, "GET") And Not Exact(context.Request.Method, "HEAD") Then
+            context.Response.StatusCode = 405
+            context.Response.SetHeader("Allow", "GET, HEAD")
+            Return
+        End If
+        Dim filePath As String = mRoot
+        Dim tail As String = context.Param(mCapture).Or("")
+        If Exact(tail, "") Then
+            context.Response.StatusCode = 404
+            Return
+        End If
+        Dim parts As Array Of String = String.Split(tail, "/")
+        Try
+            For i As Integer = 0 To Array.Count(parts) - 1
+                Dim part As String = parts(i)
+                If Exact(part, "") Or Exact(part, ".") Or Exact(part, "..") Or String.Contains(part, "\\", True) Or String.Contains(part, ":", True) Or String.Contains(part, "%", True) Then
+                    context.Response.StatusCode = 400
+                    Return
+                End If
+                filePath = New FileSystemItem(filePath).Child(part).NativePath
+                Dim entry As FileEntry = InspectFileEntry(filePath)
+                If entry.IsLink Or Exact(entry.Kind, "reparse") Then
+                    context.Response.StatusCode = 403
+                    Return
+                End If
+                If i < Array.Count(parts) - 1 And Not Exact(entry.Kind, "directory") Then
+                    context.Response.StatusCode = 404
+                    Return
+                End If
+                If i = Array.Count(parts) - 1 Then
+                    If Not Exact(entry.Kind, "file") Then
+                        context.Response.StatusCode = 404
+                        Return
+                    End If
+                    If entry.Size > mMaxBytes Then
+                        context.Response.StatusCode = 413
+                        Return
+                    End If
+                End If
+            Next
+            Dim opened As Result Of BinaryStream, IOError = BinaryStream.Open(New FileSystemItem(filePath), False)
+            If Not opened.IsOk Then
+                context.Response.StatusCode = 404
+                Return
+            End If
+            Dim stream As BinaryStream = opened.Value
+            Dim body As Bytes = Nil
+            Try
+                If stream.Length > mMaxBytes Then
+                    context.Response.StatusCode = 413
+                    Return
+                End If
+                Dim expectedBytes As Integer = stream.Length
+                body = New Bytes()
+                If expectedBytes > 0 Then
+                    body = stream.Read(expectedBytes)
+                    If stream.LastError.HasValue Or body.Count <> expectedBytes Then Throw New IOException("Static file read failed")
+                End If
+            Finally
+                stream.Close()
+            End Try
+            context.Response.SetHeader("Content-Type", "application/octet-stream")
+            context.Response.SetHeader("X-Content-Type-Options", "nosniff")
+            context.Response.SetHeader("Cache-Control", "no-cache")
+            If HttpKitNotModified(context, HttpKitETag(body)) Then Return
+            If Exact(context.Request.Method, "HEAD") Then
+                context.Response.SetHeader("Content-Length", Str(body.Count))
+            Else
+                context.Response.Write(body)
+            End If
+        Catch failure As FileInspectionException
+            context.Response.StatusCode = 404
+        End Try
+    End Sub
+End Class

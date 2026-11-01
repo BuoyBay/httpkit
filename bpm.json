@@ -1,0 +1,23 @@
+{
+    "schema": 1,
+    "buoy": "0.72.0",
+    "dependencies": {
+        "filesystemkit": {
+            "git": "https://github.com/BuoyBay/filesystemkit.git",
+            "rev": "refs/heads/main"
+        }
+    },
+    "files": [
+        "manifest.json",
+        "modules",
+        "README.md",
+        "resources/buoy-docs",
+        "resources",
+        "LICENSE",
+        "LICENSE-MIT.txt",
+        "LICENSE-APACHE.txt",
+        "LICENSE-DOCS.txt",
+        "NOTICE.md",
+        "TOOLCHAIN-REQUIREMENTS.md"
+    ]
+}

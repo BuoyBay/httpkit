@@ -1,0 +1,17 @@
+Import httpkit
+
+Class HelloHandler Implements HttpKitHandler
+    Public Sub Handle(context As HttpKitContext)
+        context.Response.SetHeader("Content-Type", "text/plain; charset=utf-8")
+        context.Write("Hello, " + context.Param("name").Or("world") + "!\n")
+    End Sub
+End Class
+
+Sub Main()
+    Dim server As New HttpKitServer()
+    server.Port = 8080
+    server.Route("GET", "/hello/:name", New HelloHandler())
+    server.Listen()
+    Print "HTTPKit example listening on all interfaces, port 8080 (plaintext, unauthenticated)"
+    RunLoop.Run()
+End Sub

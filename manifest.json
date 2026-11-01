@@ -1,0 +1,1 @@
+{"schema":1,"name":"httpkit","version":"0.1.0","description":"Middleware, parameter and wildcard routing, SHA256 entity tags and bounded static responses over HTTPServer"}
