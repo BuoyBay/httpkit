@@ -1,4 +1,4 @@
-# HTTP router — middleware, static responses, bundled HTTPServer
+# HTTP router and middleware
 
 An additive router and middleware package over the bundled HTTPServer:
 case-sensitive route captures and final wildcards, method-aware dispatch,

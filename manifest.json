@@ -1,1 +1,1 @@
-{"schema":1,"name":"httpkit","version":"0.1.0","description":"HTTP router \u2014 middleware, static responses, bundled HTTPServer"}
+{"schema":1,"name":"httpkit","version":"0.1.0","description":"HTTP router and middleware"}
