@@ -132,8 +132,6 @@ False short-circuits routing. After still runs for this middleware.
 
 Returns: no value.
 
-## HTTPKit functions
-
 ### HttpKitETagMatches
 
 `Public Function HttpKitETagMatches(ifNoneMatch As String, etag As String) As Boolean`

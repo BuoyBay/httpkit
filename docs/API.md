@@ -8,15 +8,15 @@ ordered middleware, SHA-256 ETags and bounded binary static responses.
 
 Consumers must copy **all four** archives into their `packages/` directory:
 
-- `httpkit-0.1.0.buipkg` from this workspace.
-- `filesystemkit-0.1.0.buipkg` from this workspace.
+- The `httpkit` package built from this repository.
+- The `filesystemkit` package installed through the declared BPM dependency.
 - `crypto-1.0.0.buipkg` from the Buoy installation.
 - `HTTPServer-1.1.0-httpkit.1.buipkg`, the explicit local compatibility build.
 
 Keep exactly one HTTPServer archive in a consumer. Buoy resolves by package name,
 not by version priority. Do not also install the unpatched HTTPServer archive.
-Import `httpkit`; its module imports the dependencies. The source-package bpm
-manifest does not automatically download these compiler archives.
+Import `httpkit`; its module imports the dependencies. The BPM manifest resolves the filesystem package; the compiler-supplied crypto
+and explicit HTTPServer compatibility archives must be provisioned separately.
 
 The compatibility builder reads the **installed** original archive, verifies the
 HTTPServer source SHA-256, applies narrowly scoped response-framing changes, and
@@ -28,15 +28,7 @@ python3 compat/build.py --output packages/HTTPServer-1.1.0-httpkit.1.buipkg
 /usr/bin/buoy pkg seal . -o packages/httpkit-0.1.0.buipkg
 ```
 
-Maintainers run the private validation suite before release. See the repository README for public build instructions.
-
-The original failure is preserved in
-the BUI-502 record.
-This archive is a local workaround, not a claim that upstream has fixed it.
-The builder contains the patch rather than a copied upstream source tree. It is
-a repository/source-distribution tool; the sealed HTTPKit archive carries the
-runtime module and offline docs, not the Python builder. Consumers copying the
-four required archives do not need to run that builder themselves.
+This compatibility archive contains a local framing patch; it does not imply an upstream HTTPServer fix. The source builder leaves the installed original archive unchanged.
 
 ## Router and handlers
 
@@ -142,19 +134,13 @@ mutable untrusted roots. The root may be relative and is interpreted against the
 process working directory; avoid changing cwd after construction. FileSystemKit
 rejects non-text native filenames.
 
-## Validation and platform limits
+## Platform requirements and limits
 
-Maintainers run the private validation suite before release. See the repository README for public build instructions.
-
-The installed Linux HTTPServer requires its bundled TLS archives explicitly linked,
-even for plain HTTP. The verifier uses the existing workspace native-link approach
-from tools/build_xippets_server.py, documented by
-BUI-301. Native libc search also shadows Crypto's wrapper
-library with the system library of the same name, so the verifier explicitly links
-and loads the extracted bundled wrapper from a private temporary directory.
-BUOY, BPM_PACKAGER, BUOY_HTTPSERVER_PACKAGE and BUOY_CRYPTO_PACKAGE override inputs.
+The installed Linux HTTPServer requires its bundled TLS archives to be linked,
+even for plain HTTP. Ensure the extracted bundled Crypto wrapper, rather than a
+same-named system library, is selected by the linker and native loader.
 
 HTTPServer binds all interfaces; HTTPKit cannot select a loopback bind address or
-expose remote addresses. Tests send only local requests. Windows idle timeout and
-upstream TLS certificate-chain limitations remain. Run a reverse proxy when the
-application needs capabilities that the underlying server lacks.
+expose remote addresses. Windows idle-timeout and upstream TLS certificate-chain
+limitations remain. Use a reverse proxy when the application needs capabilities
+that the underlying server lacks.

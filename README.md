@@ -1,6 +1,6 @@
 # Route HTTP requests with middleware and static responses
 
-An additive router and middleware package over Buoy's bundled HTTPServer:
+An additive router and middleware package over the bundled HTTPServer:
 case-sensitive route captures and final wildcards, method-aware dispatch,
 ordered middleware, SHA-256 ETags and bounded binary static responses.
 
@@ -43,7 +43,6 @@ On your own machine, install Buoy and run:
 buoy ai init --both
 ```
 
-The generated agent files and editor settings stay local and are ignored by Git.
 
 ## Contributing
 
